@@ -1,182 +1,144 @@
-name: Backup Production D1 Database to GCP Storage
+name: Backup D1 Database to GCP
 
 on:
   schedule:
-    - cron: "0 5 * * *"  # Daily at 05:00 UTC
+    - cron: "0 4 * * *" # 每日 UTC 04:00
   workflow_dispatch:
+    inputs:
+      environment:
+        description: "Select the environment to backup"
+        required: true
+        default: "production"
+        type: choice
+        options:
+          - production
+          - dev
 
 env:
   BACKUP_RETENTION_DAYS: 30
-  BACKUP_PREFIX: "vault1_prod"
 
 jobs:
-  backup-gcp:
-    name: Backup Production Database to GCP
+  backup-to-gcp:
+    name: Backup D1 Database to GCP
     runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event.inputs.environment == 'production'
 
     steps:
+      # ------------------------------------------------------
+      # Prepare environment
+      # ------------------------------------------------------
       - name: Get current date
         id: date
         run: echo "date=$(date +'%Y-%m-%d_%H-%M-%S')" >> $GITHUB_OUTPUT
 
-      - name: Install dependencies
-        run: |
-          npm install -g wrangler
-          sudo apt-get update
-          sudo apt-get install -y jq google-cloud-sdk
+      - name: Install wrangler
+        run: npm install -g wrangler
 
+      # ------------------------------------------------------
+      # Get D1 database name
+      # ------------------------------------------------------
       - name: Get D1 Database Name
         id: db_name
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
         run: |
-          if [ -z "$D1_DATABASE_ID" ]; then
-            echo "❌ Error: D1_DATABASE_ID secret is missing"
+          DB_NAME=$(npx wrangler d1 list --json | jq -r '.[] | select(.uuid == "${{ secrets.D1_DATABASE_ID }}") | .name')
+          if [ -z "$DB_NAME" ]; then
+            echo "❌ Could not find database name"
             exit 1
           fi
-          
-          DB_NAME=$(npx wrangler d1 list --json | jq -r ".[] | select(.uuid == \"$D1_DATABASE_ID\") | .name")
-          if [ -z "$DB_NAME" ] || [ "$DB_NAME" = "null" ]; then
-            echo "❌ Error: Could not find database with ID: $D1_DATABASE_ID"
-            exit 1
-          fi
-          echo "Database found: $DB_NAME"
           echo "db_name=$DB_NAME" >> $GITHUB_OUTPUT
 
+      # ------------------------------------------------------
+      # Export & compress
+      # ------------------------------------------------------
       - name: Export D1 Database
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          echo "Exporting D1 database: ${{ steps.db_name.outputs.db_name }}"
+          echo "Exporting D1 database..."
           npx wrangler d1 export "${{ steps.db_name.outputs.db_name }}" \
             --remote \
             --output=backup.sql
-          
-          if [ ! -f "backup.sql" ]; then
-            echo "❌ Error: Database export failed - backup.sql not created"
-            exit 1
-          fi
-          
-          gzip backup.sql
-          echo "✅ Backup exported and compressed: backup.sql.gz"
-          ls -lh backup.sql.gz
 
-      - name: Encrypt backup (if encryption key provided)
+          gzip backup.sql
+          echo "Backup compressed: backup.sql.gz"
+
+      # ------------------------------------------------------
+      # Optional encryption
+      # ------------------------------------------------------
+      - name: Encrypt backup (optional)
+        id: finalfile
         env:
           BACKUP_ENCRYPTION_KEY: ${{ secrets.BACKUP_ENCRYPTION_KEY }}
         run: |
-          if [ -n "$BACKUP_ENCRYPTION_KEY" ] && [ "$BACKUP_ENCRYPTION_KEY" != "" ]; then
-            echo "🔒 Encrypting backup..."
+          if [ -n "$BACKUP_ENCRYPTION_KEY" ]; then
+            FILE="vault1_prod_${{ steps.date.outputs.date }}.sql.gz.enc"
             openssl enc -aes-256-cbc -salt -pbkdf2 -iter 100000 \
               -in backup.sql.gz \
-              -out "${{ env.BACKUP_PREFIX }}_${{ steps.date.outputs.date }}.sql.gz.enc" \
+              -out "$FILE" \
               -pass pass:"$BACKUP_ENCRYPTION_KEY"
-            
-            if [ $? -ne 0 ]; then
-              echo "❌ Error: Backup encryption failed"
-              exit 1
-            fi
-            
+
             rm backup.sql.gz
-            ENCRYPTED_FILE="${{ env.BACKUP_PREFIX }}_${{ steps.date.outputs.date }}.sql.gz.enc"
-            echo "encrypted_file=$ENCRYPTED_FILE" >> $GITHUB_OUTPUT
-            echo "✅ Encrypted backup: $ENCRYPTED_FILE"
           else
-            mv backup.sql.gz "${{ env.BACKUP_PREFIX }}_${{ steps.date.outputs.date }}.sql.gz"
-            UNENCRYPTED_FILE="${{ env.BACKUP_PREFIX }}_${{ steps.date.outputs.date }}.sql.gz"
-            echo "encrypted_file=" >> $GITHUB_OUTPUT
-            echo "unencrypted_file=$UNENCRYPTED_FILE" >> $GITHUB_OUTPUT
-            echo "✅ Unencrypted backup: $UNENCRYPTED_FILE"
+            FILE="vault1_prod_${{ steps.date.outputs.date }}.sql.gz"
+            mv backup.sql.gz "$FILE"
           fi
 
-      - name: Authenticate to GCP
+          echo "file=$FILE" >> $GITHUB_OUTPUT
+
+      # ------------------------------------------------------
+      # Google Cloud authentication
+      # ------------------------------------------------------
+      - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT }}
 
-      - name: Set up Cloud SDK
+      - name: Setup gcloud CLI
         uses: google-github-actions/setup-gcloud@v2
-        with:
-          project_id: ${{ secrets.GCP_PROJECT_ID }}
 
-      - name: Upload backup to GCP Cloud Storage
-        env:
-          BACKUP_ENCRYPTION_KEY: ${{ secrets.BACKUP_ENCRYPTION_KEY }}
+      # ------------------------------------------------------
+      # Upload backup to GCP
+      # ------------------------------------------------------
+      - name: Upload to GCP Cloud Storage
         run: |
-          if [ -n "$BACKUP_ENCRYPTION_KEY" ] && [ "$BACKUP_ENCRYPTION_KEY" != "" ]; then
-            BACKUP_FILE="${{ env.BACKUP_PREFIX }}_${{ steps.date.outputs.date }}.sql.gz.enc"
-          else
-            BACKUP_FILE="${{ env.BACKUP_PREFIX }}_${{ steps.date.outputs.date }}.sql.gz"
-          fi
+          FILE="${{ steps.finalfile.outputs.file }}"
+          BUCKET="${{ secrets.GCP_BUCKET }}"
 
-          if [ ! -f "$BACKUP_FILE" ]; then
-            echo "❌ Error: Backup file does not exist: $BACKUP_FILE"
-            exit 1
-          fi
+          echo "Uploading $FILE to gs://$BUCKET/warden-worker/production/"
+          gsutil cp "$FILE" "gs://$BUCKET/warden-worker/production/"
 
-          BUCKET_PATH="gs://${{ secrets.GCS_BUCKET }}/warden-worker/production/"
-          UPLOAD_DEST="$BUCKET_PATH$BACKUP_FILE"
-          
-          gsutil cp "$BACKUP_FILE" "$UPLOAD_DEST"
-          
-          if [ $? -eq 0 ]; then
-            echo "✅ Successfully uploaded to: $UPLOAD_DEST"
-            # Get file size for logging (without exposing sensitive content)
-            FILE_SIZE=$(stat -c%s "$BACKUP_FILE")
-            echo "Backup size: $((FILE_SIZE / 1024 / 1024)) MB"
-          else
-            echo "❌ Error: Failed to upload backup to GCP"
-            exit 1
-          fi
+          echo "✅ Upload complete"
 
+      # ------------------------------------------------------
+      # Cleanup old backups
+      # ------------------------------------------------------
       - name: Cleanup old GCP backups
         run: |
-          if [ -z "${{ secrets.GCS_BUCKET }}" ]; then
-            echo "❌ Error: GCS_BUCKET secret is missing"
-            exit 1
-          fi
-          
-          CUTOFF_DATE=$(date -d "-${{ env.BACKUP_RETENTION_DAYS }} days" +%Y-%m-%d)
-          echo "Looking for files older than $CUTOFF_DATE"
-          
-          # List all backup files in the bucket
-          ALL_FILES=$(gsutil ls "gs://${{ secrets.GCS_BUCKET }}/warden-worker/production/${{ env.BACKUP_PREFIX }}_"* 2>/dev/null || true)
-          
-          if [ -z "$ALL_FILES" ]; then
-            echo "No backup files found to clean up"
-            exit 0
-          fi
-          
-          # Process each file
-          echo "$ALL_FILES" | while read -r file_url; do
-            if [ -n "$file_url" ]; then
-              # Extract filename from URL
-              filename=$(basename "$file_url")
-              
-              # Extract date from filename (format: prefix_YYYY-MM-DD_HH-MM-SS.ext)
-              file_date_part=$(echo "$filename" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' | head -c 10)
-              
-              if [ -n "$file_date_part" ]; then
-                # Compare dates directly
-                if [[ "$file_date_part" < "$CUTOFF_DATE" ]]; then
-                  echo "Deleting old backup: $filename (date: $file_date_part)"
-                  gsutil rm "$file_url"
-                  
-                  if [ $? -eq 0 ]; then
-                    echo "✅ Deleted: $filename"
-                  else
-                    echo "❌ Failed to delete: $filename"
-                  fi
-                else
-                  echo "Keeping recent backup: $filename (date: $file_date_part)"
-                fi
-              else
-                echo "Skipping non-backup file: $filename"
-              fi
+          BUCKET="${{ secrets.GCP_BUCKET }}"
+          CUTOFF=$(date -d "-${{ env.BACKUP_RETENTION_DAYS }} days" +%s)
+
+          echo "Cleaning backups older than $CUTOFF ..."
+
+          gsutil ls "gs://$BUCKET/warden-worker/production/" | while read -r obj; do
+            NAME=$(basename "$obj")
+
+            # extract YYYY-MM-DD
+            DATE_PART=$(echo "$NAME" | cut -d'_' -f3 | cut -d'.' -f1)
+
+            if [[ ! $DATE_PART =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2} ]]; then
+              continue
+            fi
+
+            TS=$(date -d "$DATE_PART" +%s)
+
+            if (( TS < CUTOFF )); then
+              echo "Deleting: $NAME"
+              gsutil rm "gs://$BUCKET/warden-worker/production/$NAME"
             fi
           done
-          
-          echo "✅ GCP cleanup completed"
+
+          echo "✅ Cleanup completed"
