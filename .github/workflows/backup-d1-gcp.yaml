@@ -1,134 +1,97 @@
-name: Backup D1 Database to GCP
+name: Backup D1 Database to release
 
 on:
-  schedule:
-    - cron: "0 4 * * *"
-  workflow_dispatch:
+    schedule:
+        - cron: "0 4 * * *"
+    workflow_dispatch:
+
 env:
-  BACKUP_RETENTION_DAYS: 30
+    BACKUP_RETENTION_DAYS: 3
 
 jobs:
-  backup-to-gcp:
-    name: Backup D1 Database to GCP
-    runs-on: ubuntu-latest
+    backup-production:
+        name: Backup Production D1 Database
+        runs-on: ubuntu-latest
 
-    steps:
-      # ------------------------------------------------------
-      # Prepare environment
-      # ------------------------------------------------------
-      - name: Get current date
-        id: date
-        run: echo "date=$(date +'%Y-%m-%d_%H-%M-%S')" >> $GITHUB_OUTPUT
+        steps:
+            - name: Get current date
+              id: date
+              run: echo "date=$(date +'%Y-%m-%d_%H-%M-%S')" >> $GITHUB_OUTPUT
 
-      - name: Install wrangler
-        run: npm install -g wrangler
+            - name: Install wrangler
+              run: npm install -g wrangler
 
-      # ------------------------------------------------------
-      # Get D1 database name
-      # ------------------------------------------------------
-      - name: Get D1 Database Name
-        id: db_name
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          DB_NAME=$(npx wrangler d1 list --json | jq -r '.[] | select(.uuid == "${{ secrets.D1_DATABASE_ID }}") | .name')
-          if [ -z "$DB_NAME" ]; then
-            echo "❌ Could not find database name"
-            exit 1
-          fi
-          echo "db_name=$DB_NAME" >> $GITHUB_OUTPUT
+            - name: Get D1 Database Name
+              id: db_name
+              env:
+                  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+                  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+              run: |
+                  DB_NAME=$(npx wrangler d1 list --json | jq -r '.[] | select(.uuid == "${{ secrets.D1_DATABASE_ID }}") | .name')
+                  if [ -z "$DB_NAME" ]; then
+                    echo "❌ Error: Could not find database with D1_DATABASE_ID secret"
+                    exit 1
+                  fi
+                  echo "db_name=$DB_NAME" >> $GITHUB_OUTPUT
 
-      # ------------------------------------------------------
-      # Export & compress
-      # ------------------------------------------------------
-      - name: Export D1 Database
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          echo "Exporting D1 database..."
-          npx wrangler d1 export "${{ steps.db_name.outputs.db_name }}" \
-            --remote \
-            --output=backup.sql
+            - name: Export D1 Database
+              env:
+                  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+                  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+              run: |
+                  echo "Exporting D1 database..."
+                  npx wrangler d1 export "${{ steps.db_name.outputs.db_name }}" \
+                    --remote \
+                    --output=backup.sql
+                  
+                  gzip backup.sql
+                  echo "backup.sql.gz created"
 
-          gzip backup.sql
-          echo "Backup compressed: backup.sql.gz"
+            - name: Encrypt backup (required)
+              id: encrypted
+              env:
+                  BACKUP_ENCRYPTION_KEY: ${{ secrets.BACKUP_ENCRYPTION_KEY }}
+              run: |
+                  if [ -z "$BACKUP_ENCRYPTION_KEY" ]; then
+                      echo "❌ ERROR: BACKUP_ENCRYPTION_KEY is not set. Encryption is REQUIRED."
+                      exit 1
+                  fi
 
-      # ------------------------------------------------------
-      # Optional encryption
-      # ------------------------------------------------------
-      - name: Encrypt backup (optional)
-        id: finalfile
-        env:
-          BACKUP_ENCRYPTION_KEY: ${{ secrets.BACKUP_ENCRYPTION_KEY }}
-        run: |
-          if [ -n "$BACKUP_ENCRYPTION_KEY" ]; then
-            FILE="vault1_prod_${{ steps.date.outputs.date }}.sql.gz.enc"
-            openssl enc -aes-256-cbc -salt -pbkdf2 -iter 100000 \
-              -in backup.sql.gz \
-              -out "$FILE" \
-              -pass pass:"$BACKUP_ENCRYPTION_KEY"
+                  OUTFILE="vault1_prod_${{ steps.date.outputs.date }}.sql.gz.enc"
 
-            rm backup.sql.gz
-          else
-            FILE="vault1_prod_${{ steps.date.outputs.date }}.sql.gz"
-            mv backup.sql.gz "$FILE"
-          fi
+                  echo "Encrypting backup with AES-256..."
+                  openssl enc -aes-256-cbc -salt -pbkdf2 -iter 100000 \
+                    -in backup.sql.gz \
+                    -out "$OUTFILE" \
+                    -pass pass:"$BACKUP_ENCRYPTION_KEY"
 
-          echo "file=$FILE" >> $GITHUB_OUTPUT
+                  echo "outfile=$OUTFILE" >> $GITHUB_OUTPUT
+                  rm backup.sql.gz
+                  echo "Encrypted file: $OUTFILE"
 
-      # ------------------------------------------------------
-      # Google Cloud authentication
-      # ------------------------------------------------------
-      - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+            - name: Create GitHub Release
+              uses: softprops/action-gh-release@v2
+              with:
+                  tag_name: "backup-${{ steps.date.outputs.date }}"
+                  name: "Backup ${{ steps.date.outputs.date }}"
+                  files: "${{ steps.encrypted.outputs.outfile }}"
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Setup gcloud CLI
-        uses: google-github-actions/setup-gcloud@v2
-        with:
-          install_components: gsutil
+            - name: Delete old releases (older than X days)
+              run: |
+                  echo "Cleaning releases older than $BACKUP_RETENTION_DAYS days..."
+                  
+                  gh release list --limit 100 --json name,createdAt | \
+                    jq -r '.[] | "\(.name) \(.createdAt)"' | while read name created; do
+                        created_ts=$(date -d "$created" +%s)
+                        now_ts=$(date +%s)
+                        age_days=$(( (now_ts - created_ts) / 86400 ))
 
-      # ------------------------------------------------------
-      # Upload backup to GCP
-      # ------------------------------------------------------
-      - name: Upload to GCP Cloud Storage
-        run: |
-          FILE="${{ steps.finalfile.outputs.file }}"
-          BUCKET="${{ secrets.GCP_BUCKET }}"
-
-          echo "Uploading $FILE to gs://$BUCKET/warden-worker/production/"
-          gsutil cp "$FILE" "gs://$BUCKET/warden-worker/production/"
-
-          echo "✅ Upload complete"
-
-      # ------------------------------------------------------
-      # Cleanup old backups
-      # ------------------------------------------------------
-      - name: Cleanup old GCP backups
-        run: |
-          BUCKET="${{ secrets.GCP_BUCKET }}"
-          CUTOFF=$(date -d "-${{ env.BACKUP_RETENTION_DAYS }} days" +%s)
-
-          echo "Cleaning backups older than $CUTOFF ..."
-
-          gsutil ls "gs://$BUCKET/warden-worker/production/" | while read -r obj; do
-            NAME=$(basename "$obj")
-
-            DATE_PART=$(echo "$NAME" | cut -d'_' -f3 | cut -d'.' -f1)
-
-            if [[ ! $DATE_PART =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2} ]]; then
-              continue
-            fi
-
-            TS=$(date -d "$DATE_PART" +%s)
-
-            if (( TS < CUTOFF )); then
-              echo "Deleting: $NAME"
-              gsutil rm "gs://$BUCKET/warden-worker/production/$NAME"
-            fi
-          done
-
-          echo "✅ Cleanup completed"
+                        if [ $age_days -ge $BACKUP_RETENTION_DAYS ]; then
+                          echo "🗑️ Deleting release $name (age: $age_days days)"
+                          gh release delete "$name" -y
+                        fi
+                  done
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
