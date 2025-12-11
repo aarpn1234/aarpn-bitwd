@@ -2,17 +2,7 @@ name: Backup D1 Database to GCP
 
 on:
   schedule:
-    - cron: "0 4 * * *" # 每日 UTC 04:00
-  workflow_dispatch:
-    inputs:
-      environment:
-        description: "Select the environment to backup"
-        required: true
-        default: "production"
-        type: choice
-        options:
-          - production
-          - dev
+    - cron: "0 3 * * *" # UTC 04:00
 
 env:
   BACKUP_RETENTION_DAYS: 30
@@ -21,7 +11,6 @@ jobs:
   backup-to-gcp:
     name: Backup D1 Database to GCP
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' || github.event.inputs.environment == 'production'
 
     steps:
       # ------------------------------------------------------
@@ -99,6 +88,8 @@ jobs:
 
       - name: Setup gcloud CLI
         uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: gsutil
 
       # ------------------------------------------------------
       # Upload backup to GCP
@@ -126,7 +117,6 @@ jobs:
           gsutil ls "gs://$BUCKET/warden-worker/production/" | while read -r obj; do
             NAME=$(basename "$obj")
 
-            # extract YYYY-MM-DD
             DATE_PART=$(echo "$NAME" | cut -d'_' -f3 | cut -d'.' -f1)
 
             if [[ ! $DATE_PART =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2} ]]; then
