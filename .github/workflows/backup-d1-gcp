@@ -1,4 +1,4 @@
-name: Backup D1 Database to S3
+name: Backup D1 Database to gcp
 
 on:
   schedule:
@@ -115,3 +115,4 @@ jobs:
           done
 
           echo "✅ Old backup cleanup complete."
+
