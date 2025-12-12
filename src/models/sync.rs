@@ -1,4 +1,4 @@
-use super::{cipher::Cipher, folder::FolderResponse, user::User};
+use super::{folder::FolderResponse, user::User};
 use crate::error::AppError;
 use chrono::SecondsFormat;
 use serde::Serialize;
@@ -9,6 +9,8 @@ use serde_json::Value;
 pub struct Profile {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar_color: Option<String>,
     pub email: String,
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -35,6 +37,7 @@ impl Profile {
         Ok(Self {
             id: user.id,
             name: user.name,
+            avatar_color: user.avatar_color,
             email: user.email,
             master_password_hint: user.master_password_hint,
             security_stamp: user.security_stamp,
@@ -52,8 +55,11 @@ impl Profile {
     }
 }
 
+/// Response for sync (GET /api/sync)
+/// Now we don't use this struct, we use RawJson instead. But we keep it here for reference.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct SyncResponse {
     pub profile: Profile,
     pub folders: Vec<FolderResponse>,
@@ -61,7 +67,7 @@ pub struct SyncResponse {
     pub collections: Vec<Value>,
     #[serde(default)]
     pub policies: Vec<Value>,
-    pub ciphers: Vec<Cipher>,
+    pub ciphers: Vec<Value>,
     pub domains: Value,
     #[serde(default)]
     pub sends: Vec<Value>,

@@ -1,6 +1,8 @@
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{json, Map, Value};
 
+use crate::models::attachment::AttachmentResponse;
+
 // Cipher types:
 //   Login = 1,
 //   SecureNote = 2,
@@ -87,6 +89,21 @@ where
     deserializer.deserialize_any(BoolOrIntVisitor)
 }
 
+// Custom deserialization function for cipher types
+fn deserialize_cipher_type<'de, D>(deserializer: D) -> Result<i32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = i32::deserialize(deserializer)?;
+    match value {
+        1..=5 => Ok(value), // Valid cipher types: Login, SecureNote, Card, Identity, SshKey
+        _ => Err(de::Error::invalid_value(
+            de::Unexpected::Signed(value as i64),
+            &"a valid cipher type (1=Login, 2=SecureNote, 3=Card, 4=Identity, 5=SshKey)",
+        )),
+    }
+}
+
 // The struct that is stored in the database and used in handlers.
 // For serialization to JSON for the client, we implement a custom `Serialize`.
 #[derive(Debug, Deserialize, Clone)]
@@ -123,6 +140,8 @@ pub struct Cipher {
     pub view_password: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub collection_ids: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub attachments: Option<Vec<AttachmentResponse>>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -139,27 +158,25 @@ pub struct CipherDBModel {
     pub updated_at: String,
 }
 
-impl Into<Cipher> for CipherDBModel {
-    fn into(self) -> Cipher {
+impl From<CipherDBModel> for Cipher {
+    fn from(val: CipherDBModel) -> Self {
         Cipher {
-            id: self.id,
-            user_id: Some(self.user_id),
-            organization_id: self.organization_id,
-            r#type: self.r#type,
-            data: serde_json::from_str(&self.data).unwrap_or_default(),
-            favorite: match self.favorite {
-                0 => false,
-                _ => true,
-            },
-            folder_id: self.folder_id,
-            deleted_at: self.deleted_at,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
-            object: "cipherDetails".to_string(),
+            id: val.id,
+            user_id: Some(val.user_id),
+            organization_id: val.organization_id,
+            r#type: val.r#type,
+            data: serde_json::from_str(&val.data).unwrap_or_default(),
+            favorite: val.favorite != 0,
+            folder_id: val.folder_id,
+            deleted_at: val.deleted_at,
+            created_at: val.created_at,
+            updated_at: val.updated_at,
+            object: default_object(),
             organization_use_totp: false,
             edit: true,
             view_password: true,
             collection_ids: None,
+            attachments: None,
         }
     }
 }
@@ -183,10 +200,13 @@ impl Serialize for Cipher {
         response_map.insert("edit".to_string(), json!(self.edit));
         response_map.insert("viewPassword".to_string(), json!(self.view_password));
         // new key "permissions" used by clients since v2025.6.0
-        response_map.insert("permissions". to_string(), json! ({
-            "delete": self.edit,   // if edit is true, allow delete
-            "restore": self.edit,  // if edit is true, allow restore
-        }));
+        response_map.insert(
+            "permissions".to_string(),
+            json! ({
+                "delete": self.edit,   // if edit is true, allow delete
+                "restore": self.edit,  // if edit is true, allow restore
+            }),
+        );
         response_map.insert(
             "organizationUseTotp".to_string(),
             json!(self.organization_use_totp),
@@ -195,6 +215,7 @@ impl Serialize for Cipher {
         response_map.insert("revisionDate".to_string(), json!(self.updated_at));
         response_map.insert("creationDate".to_string(), json!(self.created_at));
         response_map.insert("deletedDate".to_string(), json!(self.deleted_at));
+        response_map.insert("attachments".to_string(), json!(self.attachments));
 
         if let Some(data_obj) = self.data.as_object() {
             let data_clone = data_obj.clone();
@@ -287,6 +308,7 @@ pub struct CipherRequestData {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub organization_id: Option<String>,
     #[serde(rename = "type")]
+    #[serde(deserialize_with = "deserialize_cipher_type")]
     pub r#type: i32,
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -311,4 +333,23 @@ pub struct CreateCipherRequest {
     #[serde(default)]
     #[serde(alias = "CollectionIds")]
     pub collection_ids: Vec<String>,
+}
+
+/// Response for listing ciphers (GET /api/ciphers)
+/// Now we don't use this struct, we use RawJson instead. But we keep it here for reference.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+pub struct CipherListResponse {
+    pub data: Vec<Value>,
+    pub object: String,
+    pub continuation_token: Option<String>,
+}
+
+/// Request body for updating a cipher partially (PUT /api/ciphers/{id}/partial)
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PartialCipherData {
+    pub folder_id: Option<String>,
+    pub favorite: bool,
 }

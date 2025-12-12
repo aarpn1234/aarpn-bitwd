@@ -56,6 +56,22 @@ jobs:
             - name: Replace D1_DATABASE_ID_DEV in wrangler.toml
               run: sed -i "s/\${D1_DATABASE_ID_DEV}/${{ secrets.D1_DATABASE_ID_DEV }}/g" wrangler.toml
 
+            - name: Enable R2 binding when R2_NAME_DEV is provided
+              env:
+                  R2_NAME_DEV: ${{ secrets.R2_NAME_DEV }}
+              run: |
+                  if [ -n "$R2_NAME_DEV" ]; then
+                    echo "🔧 Enabling dev R2 bucket binding"
+                    {
+                      echo ''
+                      echo '[[env.dev.r2_buckets]]'
+                      echo 'binding = "ATTACHMENTS_BUCKET"'
+                      echo "bucket_name = \"${R2_NAME_DEV}\""
+                    } >> wrangler.toml
+                  else
+                    echo "⏭️ R2_NAME_DEV not set, skipping R2 binding"
+                  fi
+
             - name: Apply D1 database migrations (dev)
               env:
                   CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

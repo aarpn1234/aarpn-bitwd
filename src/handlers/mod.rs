@@ -1,4 +1,5 @@
 pub mod accounts;
+pub mod attachments;
 pub mod ciphers;
 pub mod config;
 pub mod devices;
@@ -8,6 +9,7 @@ pub mod identity;
 pub mod import;
 pub mod purge;
 pub mod sync;
+pub mod twofactor;
 pub mod webauth;
 
 /// Shared helper for reading an environment variable into usize.
@@ -21,4 +23,14 @@ pub(crate) fn get_env_usize(env: &worker::Env, var_name: &str, default: usize) -
 /// Convenience helper for cipher batch size using IMPORT_BATCH_SIZE.
 pub(crate) fn get_batch_size(env: &worker::Env) -> usize {
     get_env_usize(env, "IMPORT_BATCH_SIZE", 30)
+}
+
+/// Whether TOTP validation should allow ±1 time step drift.
+/// Controlled via AUTHENTICATOR_DISABLE_TIME_DRIFT (truthy -> disable drift).
+pub(crate) fn allow_totp_drift(env: &worker::Env) -> bool {
+    env.var("AUTHENTICATOR_DISABLE_TIME_DRIFT")
+        .ok()
+        .map(|value| value.to_string().to_lowercase())
+        .map(|value| !matches!(value.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(true)
 }

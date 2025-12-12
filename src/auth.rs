@@ -22,22 +22,29 @@ pub struct Claims {
     pub amr: Vec<String>,
 }
 
-impl FromRequestParts<Arc<Env>> for Claims
-{
+/// AuthUser extractor - provides (user_id, email) tuple
+pub struct AuthUser(
+    pub String, // user_id
+    #[allow(dead_code)] // email is not used in this simplified version
+    pub  String, // email
+);
+
+impl FromRequestParts<Arc<Env>> for Claims {
     type Rejection = AppError;
 
-    async fn from_request_parts(parts: &mut Parts, state: &Arc<Env>) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<Env>,
+    ) -> Result<Self, Self::Rejection> {
         // Extract the token from the authorization header
         let token = parts
             .headers
             .get(header::AUTHORIZATION)
             .and_then(|auth_header| auth_header.to_str().ok())
             .and_then(|auth_value| {
-                if auth_value.starts_with("Bearer ") {
-                    Some(auth_value[7..].to_owned())
-                } else {
-                    None
-                }
+                auth_value
+                    .strip_prefix("Bearer ")
+                    .map(|value| value.to_owned())
             })
             .ok_or_else(|| AppError::Unauthorized("Missing or invalid token".to_string()))?;
 
@@ -49,5 +56,17 @@ impl FromRequestParts<Arc<Env>> for Claims
             .map_err(|_| AppError::Unauthorized("Invalid token".to_string()))?;
 
         Ok(token_data.claims)
+    }
+}
+
+impl FromRequestParts<Arc<Env>> for AuthUser {
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<Env>,
+    ) -> Result<Self, Self::Rejection> {
+        let claims = Claims::from_request_parts(parts, state).await?;
+        Ok(AuthUser(claims.sub, claims.email))
     }
 }
