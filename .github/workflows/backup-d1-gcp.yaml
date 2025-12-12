@@ -94,7 +94,6 @@ jobs:
       - name: Clean up old backups in GCP Cloud Storage
         env:
           GCS_BUCKET: ${{ secrets.GCS_BUCKET }}
-          BACKUP_RETENTION_DAYS: ${{ env.BACKUP_RETENTION_DAYS }}
         run: |
           CUTOFF_DATE=$(date -d "-${BACKUP_RETENTION_DAYS} days" +%Y-%m-%d)
           echo "Cleaning up backups older than $CUTOFF_DATE..."
