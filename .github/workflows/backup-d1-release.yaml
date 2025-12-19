@@ -1,97 +1,100 @@
 name: Backup D1 Database to release
 
 on:
-    schedule:
-        - cron: "0 4 * * *"
-    workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
 
 env:
-    BACKUP_RETENTION_DAYS: 3
+  BACKUP_RETENTION_DAYS: 3
 
 jobs:
-    backup-production:
-        name: Backup Production D1 Database
-        runs-on: ubuntu-latest
+  backup-production:
+    name: Backup Production D1 Database
+    runs-on: ubuntu-latest
 
-        steps:
-            - name: Get current date
-              id: date
-              run: echo "date=$(date +'%Y-%m-%d_%H-%M-%S')" >> $GITHUB_OUTPUT
+    steps:
+      # 必须：给 gh CLI 提供仓库上下文
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-            - name: Install wrangler
-              run: npm install -g wrangler
+      - name: Get current date
+        id: date
+        run: echo "date=$(date +'%Y-%m-%d_%H-%M-%S')" >> $GITHUB_OUTPUT
 
-            - name: Get D1 Database Name
-              id: db_name
-              env:
-                  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-                  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-              run: |
-                  DB_NAME=$(npx wrangler d1 list --json | jq -r '.[] | select(.uuid == "${{ secrets.D1_DATABASE_ID }}") | .name')
-                  if [ -z "$DB_NAME" ]; then
-                    echo "❌ Error: Could not find database with D1_DATABASE_ID secret"
-                    exit 1
-                  fi
-                  echo "db_name=$DB_NAME" >> $GITHUB_OUTPUT
+      - name: Install wrangler
+        run: npm install -g wrangler
 
-            - name: Export D1 Database
-              env:
-                  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-                  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-              run: |
-                  echo "Exporting D1 database..."
-                  npx wrangler d1 export "${{ steps.db_name.outputs.db_name }}" \
-                    --remote \
-                    --output=backup.sql
-                  
-                  gzip backup.sql
-                  echo "backup.sql.gz created"
+      - name: Get D1 Database Name
+        id: db_name
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          DB_NAME=$(npx wrangler d1 list --json | jq -r '.[] | select(.uuid == "${{ secrets.D1_DATABASE_ID }}") | .name')
+          if [ -z "$DB_NAME" ]; then
+            echo "❌ Error: Could not find database with D1_DATABASE_ID secret"
+            exit 1
+          fi
+          echo "db_name=$DB_NAME" >> $GITHUB_OUTPUT
 
-            - name: Encrypt backup (required)
-              id: encrypted
-              env:
-                  BACKUP_ENCRYPTION_KEY: ${{ secrets.BACKUP_ENCRYPTION_KEY }}
-              run: |
-                  if [ -z "$BACKUP_ENCRYPTION_KEY" ]; then
-                      echo "❌ ERROR: BACKUP_ENCRYPTION_KEY is not set. Encryption is REQUIRED."
-                      exit 1
-                  fi
+      - name: Export D1 Database
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          echo "Exporting D1 database..."
+          npx wrangler d1 export "${{ steps.db_name.outputs.db_name }}" \
+            --remote \
+            --output=backup.sql
 
-                  OUTFILE="vault1_prod_${{ steps.date.outputs.date }}.sql.gz.enc"
+          gzip backup.sql
+          echo "backup.sql.gz created"
 
-                  echo "Encrypting backup with AES-256..."
-                  openssl enc -aes-256-cbc -salt -pbkdf2 -iter 100000 \
-                    -in backup.sql.gz \
-                    -out "$OUTFILE" \
-                    -pass pass:"$BACKUP_ENCRYPTION_KEY"
+      - name: Encrypt backup (required)
+        id: encrypted
+        env:
+          BACKUP_ENCRYPTION_KEY: ${{ secrets.BACKUP_ENCRYPTION_KEY }}
+        run: |
+          if [ -z "$BACKUP_ENCRYPTION_KEY" ]; then
+            echo "❌ ERROR: BACKUP_ENCRYPTION_KEY is not set"
+            exit 1
+          fi
 
-                  echo "outfile=$OUTFILE" >> $GITHUB_OUTPUT
-                  rm backup.sql.gz
-                  echo "Encrypted file: $OUTFILE"
+          OUTFILE="vault1_prod_${{ steps.date.outputs.date }}.sql.gz.enc"
 
-            - name: Create GitHub Release
-              uses: softprops/action-gh-release@v2
-              with:
-                  tag_name: "backup-${{ steps.date.outputs.date }}"
-                  name: "Backup ${{ steps.date.outputs.date }}"
-                  files: "${{ steps.encrypted.outputs.outfile }}"
-              env:
-                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          openssl enc -aes-256-cbc -salt -pbkdf2 -iter 100000 \
+            -in backup.sql.gz \
+            -out "$OUTFILE" \
+            -pass pass:"$BACKUP_ENCRYPTION_KEY"
 
-            - name: Delete old releases (older than X days)
-              run: |
-                  echo "Cleaning releases older than $BACKUP_RETENTION_DAYS days..."
-                  
-                  gh release list --limit 100 --json name,createdAt | \
-                    jq -r '.[] | "\(.name) \(.createdAt)"' | while read name created; do
-                        created_ts=$(date -d "$created" +%s)
-                        now_ts=$(date +%s)
-                        age_days=$(( (now_ts - created_ts) / 86400 ))
+          echo "outfile=$OUTFILE" >> $GITHUB_OUTPUT
+          rm backup.sql.gz
 
-                        if [ $age_days -ge $BACKUP_RETENTION_DAYS ]; then
-                          echo "🗑️ Deleting release $name (age: $age_days days)"
-                          gh release delete "$name" -y
-                        fi
-                  done
-              env:
-                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "backup-${{ steps.date.outputs.date }}"
+          name: "Backup ${{ steps.date.outputs.date }}"
+          files: "${{ steps.encrypted.outputs.outfile }}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Delete old backup releases
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "🧹 Cleaning backup releases older than $BACKUP_RETENTION_DAYS days..."
+
+          gh release list --limit 100 --json name,createdAt |
+          jq -r '.[] | select(.name | startswith("Backup ")) | "\(.name) \(.createdAt)"' |
+          while read name created; do
+            created_ts=$(date -d "$created" +%s)
+            now_ts=$(date +%s)
+            age_days=$(( (now_ts - created_ts) / 86400 ))
+
+            if [ "$age_days" -ge "$BACKUP_RETENTION_DAYS" ]; then
+              echo "🗑️ Deleting $name (age: ${age_days}d)"
+              gh release delete "$name" -y
+            fi
+          done
