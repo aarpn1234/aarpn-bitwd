@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 给 gh CLI 提供仓库上下文（必须）
+      # 必须：给 gh CLI 提供仓库上下文
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -83,16 +83,16 @@ jobs:
           KEEP=3
           echo "🧹 Keeping latest $KEEP backup releases..."
 
-          gh release list --limit 100 --json name,createdAt |
+          gh release list --limit 100 --json name,tagName,createdAt |
           jq -r '
             map(select(.name | startswith("Backup "))) |
             sort_by(.createdAt) |
             reverse |
             .['"$KEEP"':] |
             .[] |
-            .name
+            .tagName
           ' |
-          while read -r name; do
-            echo "🗑️ Deleting old backup release: $name"
-            gh release delete "$name" -y
+          while read -r tag; do
+            echo "🗑️ Deleting old backup release (tag: $tag)"
+            gh release delete "$tag" -y
           done
