@@ -12,7 +12,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5 # 已更新到 v5
 
       - name: Get current date
         id: date
@@ -67,7 +67,7 @@ jobs:
           rm backup.sql.gz
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3 # 已更新到 v3
         with:
           tag_name: "backup-${{ steps.date.outputs.date }}"
           name: "Backup ${{ steps.date.outputs.date }}"
